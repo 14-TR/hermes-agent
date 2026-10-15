@@ -2056,7 +2056,14 @@ def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgen
     final_response_text = (result.get("final_response") or "").strip()
     max_iteration_summary = is_max_iteration_handoff(result)
     if result.get("failed") is True or (result.get("completed") is False and not max_iteration_summary):
-        raise RuntimeError(result.get("error") or final_response_text or "agent reported failure")
+        # System interrupts can finish with no assistant text or top-level error while still
+        # carrying the concrete stop reason supplied by the lease/liveness controller. Preserve
+        # that reason instead of collapsing a diagnosable failure to "agent reported failure".
+        interrupt_message = str(result.get("interrupt_message") or "").strip()
+        raise RuntimeError(
+            result.get("error") or final_response_text or interrupt_message
+            or turn_exit_reason or "agent reported failure"
+        )
     if max_iteration_summary:
         logger.warning(
             "Job '%s' reached the iteration limit but produced a final fallback response; "
