@@ -29,3 +29,14 @@ def test_a_failed_turn_still_raises_so_the_job_is_marked_failed():
               "turn_exit_reason": "repeated_outer_errors(x)", "messages": [], "api_calls": 3}
     with pytest.raises(RuntimeError):
         _final_response_from_result(result, "job1", "Morning brief", _AIAgent)
+
+
+def test_a_failed_interrupted_turn_surfaces_the_interrupt_message():
+    result = {
+        "final_response": "", "failed": True, "completed": False,
+        "turn_exit_reason": "interrupted_by_system(session_turn_lease_lost)",
+        "interrupt_message": "Session turn lease could not be refreshed; stopping to protect the transcript.",
+        "messages": [], "api_calls": 6,
+    }
+    with pytest.raises(RuntimeError, match="Session turn lease could not be refreshed"):
+        _final_response_from_result(result, "job1", "Morning brief", _AIAgent)
