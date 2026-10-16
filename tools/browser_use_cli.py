@@ -726,7 +726,7 @@ def _process_generation(pid: int):
     try:
         from gateway.status import get_process_start_time
         return get_process_start_time(pid)
-    except Exception:
+    except (ImportError, OSError, ValueError):
         return None
 
 
@@ -790,7 +790,7 @@ def _register_harness_owner(name: str) -> None:
     except Exception as exc:
         # Ownership is defense in depth. If it cannot be recorded, clean-exit
         # teardown retains the historical stop behavior rather than leaking.
-        logger.debug("Could not register browser-harness owner for %s: %s", name, exc)
+        logger.debug("Could not register browser-harness owner for %s: %s", name, exc, exc_info=True)
 
 
 def _stop_owned_harness_daemon(name: str) -> None:
@@ -816,7 +816,7 @@ def _stop_owned_harness_daemon(name: str) -> None:
             _run_harness_reload(name)
             _cleanup_dead_harness_files(ipc, name)
     except Exception as exc:
-        logger.debug("Could not stop owned browser-harness daemon %s: %s", name, exc)
+        logger.debug("Could not stop owned browser-harness daemon %s: %s", name, exc, exc_info=True)
 
 
 def _run_harness_reload(name: str) -> None:
@@ -856,7 +856,7 @@ def _cleanup_dead_harness_files(ipc, name: str) -> None:
     """Remove pid/socket/port artifacts only when no harness daemon answers or lives."""
     try:
         live_pid = ipc.identify(name, timeout=0.2)
-    except Exception:
+    except (OSError, ValueError):
         live_pid = None
     if live_pid is not None or _harness_pid_alive(ipc, name):
         return
@@ -904,7 +904,7 @@ def reap_orphaned_harness_daemons() -> None:
                     _run_harness_reload(name)
                 _cleanup_dead_harness_files(ipc, name)
         except Exception as exc:
-            logger.debug("browser-harness orphan reap failed for %s: %s", name, exc)
+            logger.debug("browser-harness orphan reap failed for %s: %s", name, exc, exc_info=True)
 
 
 def _reap_harness_once() -> None:
