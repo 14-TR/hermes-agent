@@ -256,3 +256,165 @@ def test_decompose_returns_false_when_task_not_triage(kanban_home):
     assert outcome.ok is False
 
 
+def test_decompose_rechecks_status_after_task_was_queued(kanban_home):
+    """A card stopped while its queued aux request is running creates no children."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="stop this race", triage=True)
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "tasks": [{"title": "must not exist", "body": "work", "assignee": "builder", "parents": []}],
+    })
+
+    def stop_then_reply(*_args, **_kwargs):
+        with kbc.connect() as conn:
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,))
+        return llm_payload, ""
+
+    patches = _patch_list_profiles(["builder"])
+    for p in patches:
+        p.start()
+    try:
+        with patch.object(decomp, "_call_aux", side_effect=stop_then_reply):
+            outcome = decomp.decompose_task(tid, author="auto-decomposer")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok is False
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task is not None and task.status == "blocked"
+        assert kb.task_graph_context(conn, tid)["parents"] == []
+
+
+def test_decompose_skips_triage_escalated_from_block_loop(kanban_home):
+    """Triage is also the human escalation lane; those cards are stopped work."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="human decision needed", triage=True)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET block_kind = 'needs_input', block_recurrences = ? WHERE id = ?",
+                (kb.BLOCK_RECURRENCE_LIMIT, tid),
+            )
+
+    assert tid not in decomp.list_triage_ids()
+    with patch.object(decomp, "_call_aux") as aux:
+        outcome = decomp.decompose_task(tid, author="auto-decomposer")
+
+    assert outcome.ok is False
+    assert "human-stopped" in outcome.reason
+    aux.assert_not_called()
+
+
+def test_comment_override_is_preserved_in_child_body(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="change a repo", body="Commit the fix directly to main.", triage=True,
+        )
+        kb.add_comment(
+            conn, tid, "operator",
+            "Override: Do NOT commit to main. Use a new local task branch.",
+        )
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "tasks": [{"title": "make the fix", "body": "Implement the requested change.",
+                   "assignee": "builder", "parents": []}],
+    })
+    patches = _patch_list_profiles(["builder"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload):
+            outcome = decomp.decompose_task(tid, author="auto-decomposer")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok, outcome.reason
+    with kbc.connect() as conn:
+        child = kb.get_task(conn, outcome.child_ids[0])
+    assert child is not None and child.body is not None
+    assert "Do NOT commit to main" in child.body
+    assert "operator" in child.body
+
+
+def test_new_comment_during_aux_call_invalidates_stale_plan(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="plan me", body="Original instructions", triage=True)
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "tasks": [{"title": "stale child", "body": "stale plan", "assignee": "builder", "parents": []}],
+    })
+
+    def comment_then_reply(*_args, **_kwargs):
+        with kbc.connect() as conn:
+            kb.add_comment(conn, tid, "operator", "Use a different approach instead.")
+        return llm_payload, ""
+
+    patches = _patch_list_profiles(["builder"])
+    for p in patches:
+        p.start()
+    try:
+        with patch.object(decomp, "_call_aux", side_effect=comment_then_reply):
+            outcome = decomp.decompose_task(tid, author="auto-decomposer")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok is False
+    assert "comments changed" in outcome.reason
+    with kbc.connect() as conn:
+        assert kb.task_graph_context(conn, tid)["parents"] == []
+
+
+def test_stop_comment_excludes_card_from_picker(kanban_home):
+    with kbc.connect() as conn:
+        stopped = kb.create_task(conn, title="stopped", triage=True)
+        actionable = kb.create_task(conn, title="actionable", triage=True)
+        kb.add_comment(conn, stopped, "operator", "TR DECISION: STOP this card now.")
+
+    assert decomp.list_triage_ids() == [actionable]
+
+
+def test_newer_resume_comment_overrides_stop_comment(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="resume safely", triage=True)
+        kb.add_comment(conn, tid, "operator", "STOP this card now.")
+        kb.add_comment(conn, tid, "operator", "Resume this card with the revised instructions.")
+
+    assert decomp.list_triage_ids() == [tid]
+
+
+def test_uncertain_plan_comments_instead_of_decomposing(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="ambiguous", triage=True)
+
+    llm_payload = jsonlib.dumps({
+        "needs_clarification": True,
+        "clarification": "Should the protected branch be changed?",
+    })
+    patches = _patch_list_profiles(["builder"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload):
+            outcome = decomp.decompose_task(tid, author="auto-decomposer")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok is False
+    assert outcome.reason == "decomposition needs clarification"
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, tid)
+        comments = kb.list_comments(conn, tid)
+        assert task is not None and task.status == "triage"
+        assert kb.task_graph_context(conn, tid)["parents"] == []
+    assert comments[-1].author == "auto-decomposer"
+    assert "Should the protected branch be changed?" in comments[-1].body
+
+
