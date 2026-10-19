@@ -341,6 +341,40 @@ def test_comment_override_is_preserved_in_child_body(kanban_home):
     assert "operator" in child.body
 
 
+def test_newest_comment_override_survives_bounded_child_appendix(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="change a repo", body="Commit the fix directly to main.", triage=True,
+        )
+        for index in range(19):
+            kb.add_comment(conn, tid, "operator", f"Background {index}: " + ("x" * 900))
+        kb.add_comment(
+            conn, tid, "operator",
+            "Override: Do NOT commit to main. Use a new local task branch.",
+        )
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "tasks": [{"title": "safe child", "body": "implement it", "assignee": "builder", "parents": []}],
+    })
+    patches = _patch_list_profiles(["builder"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload):
+            outcome = decomp.decompose_task(tid, author="auto-decomposer")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok, outcome.reason
+    assert outcome.child_ids
+    with kbc.connect() as conn:
+        child = kb.get_task(conn, outcome.child_ids[0])
+    assert child is not None and child.body is not None
+    assert "Do NOT commit to main" in child.body
+
+
 def test_new_comment_during_aux_call_invalidates_stale_plan(kanban_home):
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="plan me", body="Original instructions", triage=True)
@@ -376,6 +410,15 @@ def test_stop_comment_excludes_card_from_picker(kanban_home):
         stopped = kb.create_task(conn, title="stopped", triage=True)
         actionable = kb.create_task(conn, title="actionable", triage=True)
         kb.add_comment(conn, stopped, "operator", "TR DECISION: STOP this card now.")
+
+    assert decomp.list_triage_ids() == [actionable]
+
+
+def test_incident_stop_comment_excludes_card_from_picker(kanban_home):
+    with kbc.connect() as conn:
+        stopped = kb.create_task(conn, title="stopped", triage=True)
+        actionable = kb.create_task(conn, title="actionable", triage=True)
+        kb.add_comment(conn, stopped, "operator", "STOP, clean start")
 
     assert decomp.list_triage_ids() == [actionable]
 

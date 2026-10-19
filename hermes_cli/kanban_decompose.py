@@ -260,7 +260,15 @@ def _format_comments(comments: list[kb.Comment]) -> str:
     for comment in comments[-20:]:
         body = comment.body.strip()
         rendered.append(f"  - comment #{comment.id} by {comment.author}: {body[:1000]}")
-    return "\n".join(rendered)[:6000]
+    selected = []
+    selected_length = 0
+    for entry in reversed(rendered):
+        separator_length = 1 if selected else 0
+        if selected_length + separator_length + len(entry) > 6000:
+            break
+        selected.append(entry)
+        selected_length += separator_length + len(entry)
+    return "\n".join(reversed(selected))
 
 
 def _source_comments_appendix(comments: list[kb.Comment]) -> str:
@@ -276,6 +284,8 @@ def _has_stop_comment(comments: list[kb.Comment]) -> bool:
     """Recognise explicit operator stop/cancel language, not bounded directives
     such as "do not commit to main" that should instead flow into child specs."""
     stop_patterns = (
+        r"(?im)^\s*(?:(?:tr|human|operator)\s+decision\s*:\s*)?"
+        r"(?:stop|cancel)\b(?=\s*(?:[,;:.!?—-]|$))",
         r"\bstop\s+(?:this\s+)?(?:card|task|work)\b",
         r"\bstop\s+now\b",
         r"\bno\s+further\s+(?:feature\s+)?work\b",
