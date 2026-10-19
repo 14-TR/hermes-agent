@@ -90,5 +90,29 @@ def test_decompose_records_audit_comment_and_event(kanban_home):
     assert any(ev.kind == "decomposed" for ev in events)
 
 
+def test_decompose_atomically_rejects_comment_newer_than_plan(kanban_home):
+    with kbc.connect() as conn:
+        tid = _create_triage(conn)
+        first_comment_id = kb.add_comment(conn, tid, "operator", "initial direction")
+        kb.add_comment(conn, tid, "operator", "new override")
+        before_ids = {row.id for row in kb.list_tasks(conn, limit=1000)}
+
+        child_ids = decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orch",
+            children=[{"title": "stale task", "assignee": "researcher"}],
+            author="auto-decomposer",
+            expected_latest_comment_id=first_comment_id,
+        )
+
+        after_ids = {row.id for row in kb.list_tasks(conn, limit=1000)}
+        root = kb.get_task(conn, tid)
+
+    assert child_ids is None
+    assert after_ids == before_ids
+    assert root is not None and root.status == "triage"
+
+
 
 
