@@ -42,6 +42,7 @@ matching profile from the available roster.
 
 You will be given:
   - The original task title and body
+  - The card's comments, oldest to newest
   - The list of available profiles (each with name + description)
   - The fallback "default_assignee" used when no profile fits
 
@@ -74,6 +75,11 @@ Rules:
     and the system will route to the default_assignee.
   - Each child task body is what a fresh worker will read with no other
     context — be specific about goal, approach, and acceptance criteria.
+  - Comments are newer than the card body and therefore authoritative. If a
+    comment conflicts with the body, obey the newest comment and carry that
+    override into every affected child body.
+  - If the instructions cannot be reconciled safely, do not guess. Return
+    {"needs_clarification": true, "clarification": "<specific question>"}.
 
 When the task is genuinely a single unit of work (no useful decomposition),
 return:
@@ -99,6 +105,9 @@ Title: {title}
 Body:
 {body}
 
+Card comments (oldest to newest; newer comments override the body):
+{comments}
+
 Available profiles (assignees you may pick from):
 {roster}
 
@@ -119,6 +128,13 @@ class DecomposeOutcome:
     fanout: bool = False
     child_ids: list[str] | None = None
     new_title: Optional[str] = None
+
+
+@dataclass
+class _SourceContext:
+    task: kb.Task
+    comments: list[kb.Comment]
+    latest_comment_id: int
 
 
 def _profile_author() -> str:
@@ -237,10 +253,83 @@ def _apply_single(task: kb.Task, parsed: dict, routing: _Routing, author: str) -
     return DecomposeOutcome(task.id, True, "single task (no fanout)", fanout=False, new_title=title_val)
 
 
-def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[list[dict], str]:
+def _format_comments(comments: list[kb.Comment]) -> str:
+    if not comments:
+        return "  (no comments)"
+    rendered = []
+    for comment in comments[-20:]:
+        body = comment.body.strip()
+        rendered.append(f"  - comment #{comment.id} by {comment.author}: {body[:1000]}")
+    return "\n".join(rendered)[:6000]
+
+
+def _source_comments_appendix(comments: list[kb.Comment]) -> str:
+    if not comments:
+        return ""
+    return (
+        "\n\nAuthoritative source-card comments (newer than the original body; obey on conflict):\n"
+        + _format_comments(comments)
+    )
+
+
+def _has_stop_comment(comments: list[kb.Comment]) -> bool:
+    """Recognise explicit operator stop/cancel language, not bounded directives
+    such as "do not commit to main" that should instead flow into child specs."""
+    stop_patterns = (
+        r"\bstop\s+(?:this\s+)?(?:card|task|work)\b",
+        r"\bstop\s+now\b",
+        r"\bno\s+further\s+(?:feature\s+)?work\b",
+        r"\bnothing\s+should\s+run\b",
+        r"\bcancel(?:led)?\s+(?:this\s+)?(?:card|task|work)\b",
+    )
+    resume_patterns = (
+        r"\bresume\s+(?:this\s+)?(?:card|task|work)\b",
+        r"\bcontinue\s+(?:this\s+)?(?:card|task|work)\b",
+        r"\bproceed\s+with\s+(?:this\s+)?(?:card|task|work)\b",
+    )
+    stopped = False
+    for comment in comments:
+        if any(re.search(pattern, comment.body, re.IGNORECASE) for pattern in stop_patterns):
+            stopped = True
+        if any(re.search(pattern, comment.body, re.IGNORECASE) for pattern in resume_patterns):
+            stopped = False
+    return stopped
+
+
+def _load_source_context(task_id: str) -> tuple[Optional[_SourceContext], str]:
+    task, reason = _load_triage_task(task_id)
+    if task is None:
+        return None, reason
+    with kbc.connect_closing() as conn:
+        comments = kb.list_comments(conn, task_id)
+    if task.block_recurrences >= kb.BLOCK_RECURRENCE_LIMIT:
+        return None, "human-stopped triage escalation (block loop)"
+    if _has_stop_comment(comments):
+        return None, "human-stopped by card comment"
+    return _SourceContext(task, comments, comments[-1].id if comments else 0), ""
+
+
+def _source_guard_reason(source: _SourceContext) -> str:
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, source.task.id)
+        comments = kb.list_comments(conn, source.task.id)
+    if task is None or task.status != "triage":
+        return "task moved out of triage before decomposition"
+    if task.block_recurrences >= kb.BLOCK_RECURRENCE_LIMIT or _has_stop_comment(comments):
+        return "task was human-stopped before decomposition"
+    latest_comment_id = comments[-1].id if comments else 0
+    if latest_comment_id != source.latest_comment_id:
+        return "card comments changed during decomposition; stale plan discarded"
+    return ""
+
+
+def _clean_children(
+    task_id: str, raw_tasks: list, routing: _Routing, comments: list[kb.Comment],
+) -> tuple[list[dict], str]:
     """Validate/normalise the LLM's ``tasks`` list; ``(children, "")`` or ``([], reason)``.
     Unknown assignees route to the default; never assignee=None."""
     children: list[dict] = []
+    comments_appendix = _source_comments_appendix(comments)
     for idx, entry in enumerate(raw_tasks):
         if not isinstance(entry, dict):
             return [], f"tasks[{idx}] is not an object"
@@ -263,7 +352,7 @@ def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[l
             parents = []
         children.append({
             "title": title.strip()[:200],
-            "body": body.strip() if isinstance(body, str) else "",
+            "body": (body.strip() if isinstance(body, str) else "") + comments_appendix,
             "assignee": chosen,
             # Drop non-int, out-of-range and self parent indices.
             "parents": [p for p in parents if isinstance(p, int) and 0 <= p < len(raw_tasks) and p != idx],
@@ -271,11 +360,17 @@ def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[l
     return children, ""
 
 
-def _apply_fanout(task_id: str, parsed: dict, routing: _Routing, author: str) -> DecomposeOutcome:
+def _apply_fanout(
+    source: _SourceContext, parsed: dict, routing: _Routing, author: str,
+) -> DecomposeOutcome:
+    task_id = source.task.id
     raw_tasks = parsed.get("tasks") or []
     if not isinstance(raw_tasks, list) or not raw_tasks:
         return DecomposeOutcome(task_id, False, "decomposer returned fanout=true with empty tasks list")
-    children, reason = _clean_children(task_id, raw_tasks, routing)
+    children, reason = _clean_children(task_id, raw_tasks, routing, source.comments)
+    if reason:
+        return DecomposeOutcome(task_id, False, reason)
+    reason = _source_guard_reason(source)
     if reason:
         return DecomposeOutcome(task_id, False, reason)
     try:
@@ -287,6 +382,7 @@ def _apply_fanout(task_id: str, parsed: dict, routing: _Routing, author: str) ->
                 children=children,
                 author=author,
                 auto_promote=routing.auto_promote,
+                expected_latest_comment_id=source.latest_comment_id,
             )
     except ValueError as exc:
         return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
@@ -309,15 +405,17 @@ def decompose_task(
     """Decompose a triage task into a graph of child tasks. Expected failures
     (not in triage, no aux client, API error, malformed/empty reply) surface
     as ``ok=False``."""
-    task, reason = _load_triage_task(task_id)
-    if task is None:
+    source, reason = _load_source_context(task_id)
+    if source is None:
         return DecomposeOutcome(task_id, False, reason)
+    task = source.task
 
     routing = _load_routing(root_assignee=task.assignee)
     raw, reason = _call_aux(
         "decompose", task_id, aux_task="kanban_decomposer", system=_SYSTEM_PROMPT,
         user=_USER_TEMPLATE.format(
             **_task_prompt_fields(task),
+            comments=_format_comments(source.comments),
             roster=_format_roster(routing.roster),
             default_assignee=routing.default_assignee,
         ),
@@ -331,13 +429,33 @@ def decompose_task(
         return DecomposeOutcome(task_id, False, "LLM returned malformed JSON")
 
     audit_author = author or _profile_author()
+    if parsed.get("needs_clarification"):
+        clarification = parsed.get("clarification")
+        if not isinstance(clarification, str) or not clarification.strip():
+            clarification = "The card's body and comments could not be reconciled safely."
+        with kbc.connect_closing() as conn:
+            kb.add_comment(
+                conn, task_id, audit_author,
+                f"Auto-decomposition paused for clarification: {clarification.strip()}",
+            )
+        return DecomposeOutcome(task_id, False, "decomposition needs clarification")
     if not parsed.get("fanout"):
+        reason = _source_guard_reason(source)
+        if reason:
+            return DecomposeOutcome(task_id, False, reason)
+        body = parsed.get("body")
+        if isinstance(body, str):
+            parsed = {**parsed, "body": body + _source_comments_appendix(source.comments)}
         return _apply_single(task, parsed, routing, audit_author)
-    return _apply_fanout(task_id, parsed, routing, audit_author)
+    return _apply_fanout(source, parsed, routing, audit_author)
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+    """Return actionable triage ids, excluding human-stopped escalations."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+        return [
+            row.id for row in rows
+            if row.block_recurrences < kb.BLOCK_RECURRENCE_LIMIT
+            and not _has_stop_comment(kb.list_comments(conn, row.id))
+        ]
