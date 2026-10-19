@@ -90,6 +90,7 @@ def _validate_children_graph(children: list) -> None:
 def decompose_triage_task(
     conn: sqlite3.Connection, task_id: str, *, root_assignee: Optional[str], children: list[dict],
     author: Optional[str] = None, auto_promote: bool = True,
+    expected_latest_comment_id: Optional[int] = None,
 ) -> Optional[list[str]]:
     """Fan a triage task out into children and move the root to ``todo``; the root
     waits on every child and wakes (``ready``) when all are done.
@@ -100,7 +101,7 @@ def decompose_triage_task(
     in triage, or has already decomposed. Atomic: malformed entries abort fan-out.
     """
     from hermes_cli.kanban_db import (
-        _canonical_assignee, _link, _append_event, _insert_comment,
+        BLOCK_RECURRENCE_LIMIT, _canonical_assignee, _link, _append_event, _insert_comment,
         write_txn, recompute_ready,
     )
 
@@ -115,11 +116,21 @@ def decompose_triage_task(
     now = int(time.time())
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, block_recurrences "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
-        if root_row is None or root_row["status"] != "triage":
+        if (
+            root_row is None
+            or root_row["status"] != "triage"
+            or root_row["block_recurrences"] >= BLOCK_RECURRENCE_LIMIT
+        ):
             return None
+        if expected_latest_comment_id is not None:
+            latest_comment_id = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM task_comments WHERE task_id = ?", (task_id,),
+            ).fetchone()[0]
+            if latest_comment_id != expected_latest_comment_id:
+                return None
         # Dependency links alone do not imply lineage. The completion event is
         # committed with the graph, and survives re-triage or unlinking.
         if conn.execute(
