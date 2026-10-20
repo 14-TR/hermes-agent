@@ -460,6 +460,8 @@ def _catalog_registry(cat: _Catalog) -> None:
 
 
 def _catalog_quick_commands(cat: _Catalog) -> None:
+    from hermes_cli.commands_completion import quick_command_description
+
     qcmds = _load_cfg().get("quick_commands", {}) or {}
     if not (isinstance(qcmds, dict) and qcmds):
         return
@@ -467,10 +469,7 @@ def _catalog_quick_commands(cat: _Catalog) -> None:
     for qname, qc in sorted(qcmds.items()):
         if not isinstance(qc, dict):
             continue
-        qtype = qc.get("type", "")
-        default_desc = {"exec": f"exec: {qc.get('command', '')}", "alias": f"alias → {qc.get('target', '')}"}
-        desc = str(qc.get("description") or default_desc.get(qtype, qtype or "quick command"))
-        cat.add(f"/{qname}", desc, "User commands")
+        cat.add(f"/{qname}", quick_command_description(qc), "User commands")
 
 
 def _catalog_plugin_commands(cat: _Catalog) -> None:
