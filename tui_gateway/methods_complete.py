@@ -292,8 +292,13 @@ def _(rid, params: dict) -> dict:
     with _session_home_scope(_sessions.get(params.get("session_id", "")), cwd=_completion_cwd(params),
                              profile=params.get("profile")):
         skill_commands, skill_bundles = dict(get_interactive_skill_commands()), dict(get_skill_bundles())
+        # The profile's quick_commands are dispatchable by name, so offer them while typing too.
+        quick_commands = _load_cfg().get("quick_commands") or {}
+    if not isinstance(quick_commands, dict):
+        quick_commands = {}
     completer = SlashCommandCompleter(
-        skill_commands_provider=lambda: skill_commands, skill_bundles_provider=lambda: skill_bundles)
+        skill_commands_provider=lambda: skill_commands, skill_bundles_provider=lambda: skill_bundles,
+        quick_commands_provider=lambda: quick_commands)
     # `kind` reaches the TUI as data (from the providers, not sniffed from ⚡/▣ glyphs):
     # skills/bundles are the only completions for an inline `/skill` typed mid-message.
     skill_names = {key.lstrip("/").lower() for key in (*skill_commands, *skill_bundles)}

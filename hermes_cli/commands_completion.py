@@ -272,8 +272,10 @@ class SlashCommandCompleter(Completer):
         self,
         skill_commands_provider: Callable[[], Mapping[str, dict[str, Any]]] | None = None,
         command_filter: Callable[[str], bool] | None = None,
-        skill_bundles_provider: Callable[[], Mapping[str, dict[str, Any]]] | None = None) -> None:
+        skill_bundles_provider: Callable[[], Mapping[str, dict[str, Any]]] | None = None,
+        quick_commands_provider: Callable[[], Mapping[str, dict[str, Any]]] | None = None) -> None:
         self._skill_commands_provider = skill_commands_provider
+        self._quick_commands_provider = quick_commands_provider
         self._command_filter = command_filter
         self._skill_bundles_provider = skill_bundles_provider
         # Cached project file list for fuzzy @ completions
@@ -445,6 +447,12 @@ class SlashCommandCompleter(Completer):
         def _cmd_completion(cmd_name: str, meta: str):
             return _completion(self._completion_text(cmd_name, word), word, f"/{cmd_name}", meta)
 
+        # The user's own quick_commands lead: deliberate shortcuts win prefix-score ties
+        # (the slash ranker sorts stably). Registry names keep their registry entry.
+        for name, qc in self._call_provider(self._quick_commands_provider).items():
+            name = str(name).lstrip("/")
+            if isinstance(qc, dict) and name.lower().startswith(word.lower()) and f"/{name}".lower() not in COMMANDS:
+                yield _cmd_completion(name, quick_command_description(qc))
         for cmd, desc in COMMANDS.items():
             if self._command_allowed(cmd) and cmd[1:].startswith(word):
                 yield _cmd_completion(cmd[1:], desc)
@@ -464,6 +472,13 @@ class SlashCommandCompleter(Completer):
                         cmd_name, f"🔌 {cmd_info.get('description', 'Plugin command')}")
         except Exception:
             pass
+
+
+def quick_command_description(qc: Mapping[str, Any]) -> str:
+    """Popup meta for a ``quick_commands`` entry (shared with the desktop ``commands.catalog``)."""
+    qtype = qc.get("type", "")
+    default_desc = {"exec": f"exec: {qc.get('command', '')}", "alias": f"alias → {qc.get('target', '')}"}
+    return str(qc.get("description") or default_desc.get(qtype, qtype or "quick command"))
 
 
 class SlashCommandAutoSuggest(AutoSuggest):
