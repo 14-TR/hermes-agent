@@ -400,13 +400,30 @@ def _pid_recycled(pid: Optional[int], started_at) -> bool:
     if started_at == UNVERIFIED_WORKER_FINGERPRINT:
         return True
     if isinstance(started_at, str) and "|" in started_at:
-        return _process_fingerprint(int(pid)) != started_at
-    from gateway.status import _start_times_agree, get_process_start_time
+        # Compare the instantiation epoch exactly but the start time with drift tolerance: on macOS
+        # psutil derives create_time from the adjustable kern.boottime, so a live worker's reading
+        # moves by ~1 s (100 cs) after spawn. Exact string equality reported such workers crashed
+        # (t_78c2c417); a recycled PID is still caught because its start time is far off.
+        current = _process_fingerprint(int(pid))
+        if current is None:
+            return True
+        rec_epoch, _, rec_start = started_at.rpartition("|")
+        cur_epoch, _, cur_start = current.rpartition("|")
+        if rec_epoch != cur_epoch:
+            return True
+        from gateway.status import start_time_fingerprints_match
+        try:
+            return not start_time_fingerprints_match(rec_start, cur_start)
+        except (TypeError, ValueError):
+            return True
+    from gateway.status import get_process_start_time, start_time_fingerprints_match
     current = get_process_start_time(int(pid))
     if current is None:
         return True
     try:
-        return not _start_times_agree(current, started_at)
+        if int(started_at) <= 0:
+            return True
+        return not start_time_fingerprints_match(started_at, current)
     except (TypeError, ValueError):
         return True
 
