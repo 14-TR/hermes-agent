@@ -1481,9 +1481,9 @@ def test_sessionless_slash_palette_follows_profile_param(server, tmp_path, monke
             patch("tools.skills_tool.SKILLS_DIR", tmp_path / "no-local-skills"),
             patch.object(sc_mod, "_skill_commands_by_key", {}),
         ):
-            assert palette("s6probe-a") == ({"/s6probe-a-only"}, {"s6probe-a-only"}, {"/s6probe-a-qc"})
-            assert palette("s6probe-b") == ({"/s6probe-b-only"}, {"s6probe-b-only"}, {"/s6probe-b-qc"})
-            assert palette("s6probe-a") == ({"/s6probe-a-only"}, {"s6probe-a-only"}, {"/s6probe-a-qc"})
+            assert palette("s6probe-a") == ({"/s6probe-a-only"}, {"s6probe-a-only", "s6probe-a-qc"}, {"/s6probe-a-qc"})
+            assert palette("s6probe-b") == ({"/s6probe-b-only"}, {"s6probe-b-only", "s6probe-b-qc"}, {"/s6probe-b-qc"})
+            assert palette("s6probe-a") == ({"/s6probe-a-only"}, {"s6probe-a-only", "s6probe-a-qc"}, {"/s6probe-a-qc"})
             for method in ("commands.catalog", "skills.reload"):
                 bad = server.handle_request({"id": "r3", "method": method, "params": {"profile": "../x"}})
                 assert bad.get("error", {}).get("code") == 4064, (method, bad)
