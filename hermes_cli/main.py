@@ -2578,12 +2578,11 @@ def _dashboard_sanitize_desktop_env(headless_backend) -> None:
     keeps the packaged path used by the Desktop backend. Headless `serve`
     re-sets HERMES_SERVE_HEADLESS itself.
 
-    The Desktop's legacy fallback spawn (`dashboard --no-open`, taken when the
-    `serve --help` probe times out on a cold host) is not headless yet must keep
-    its packaged dist: it is told apart by the per-spawn
-    HERMES_DASHBOARD_SESSION_TOKEN, which the terminal pane never receives and
-    the terminal tool's env policy strips from agent children.
-    """
+    The Desktop's legacy fallback (`dashboard --no-open`) keeps its packaged dist,
+    told apart by the per-spawn HERMES_DASHBOARD_SESSION_TOKEN. Worker/delegate
+    lineage (fence marker, HERMES_KANBAN_*) is dropped: this host outlives it."""
+    from agent.delegation_context import clear_user_surface_worker_env
+    clear_user_surface_worker_env()
     desktop_owned_child = _is_desktop_owned_backend()
     if (
         not headless_backend

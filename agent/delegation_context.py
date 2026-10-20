@@ -25,6 +25,32 @@ KANBAN_ENV_KEYS: tuple[str, ...] = (
 )
 
 
+def clear_user_surface_worker_env(env: MutableMapping[str, str] | None = None) -> None:
+    """Drop inherited worker lineage before a long-lived user surface starts.
+
+    Dashboard/desktop servers can outlive the worker or delegated child that
+    launched them.  Keeping that launcher's fence, task, board pins, or workspace
+    would make every later user session look like the launcher.  This is an
+    explicit host-boundary operation; ordinary descendants continue to use
+    :func:`delegated_child_subprocess_env` and remain fenced.
+    """
+    target = os.environ if env is None else env
+    kanban_keys = [key for key in target if key.startswith("HERMES_KANBAN_")]
+    if not (kanban_keys or target.get(DELEGATED_CHILD_ENV_MARKER)):
+        return
+
+    workspace = target.get("HERMES_KANBAN_WORKSPACE")
+    if workspace and target.get("TERMINAL_CWD") == workspace:
+        target.pop("TERMINAL_CWD", None)
+    for key in kanban_keys:
+        target.pop(key, None)
+    target.pop(DELEGATED_CHILD_ENV_MARKER, None)
+    target.pop("HERMES_TENANT", None)
+    target.pop("HERMES_PROFILE", None)
+    if target.get("HERMES_SESSION_SOURCE") == "kanban":
+        target.pop("HERMES_SESSION_SOURCE", None)
+
+
 @contextmanager
 def delegated_child_context(session_id: str | None = None) -> Iterator[None]:
     """Mark child execution and isolate its task-local session identity. Even a context
