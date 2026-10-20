@@ -149,3 +149,67 @@ def test_unverified_fingerprint_capture_never_authorizes_a_signal(board, monkeyp
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
     assert kb.release_stale_claims(conn, signal_fn=sig) == 1
     assert killed == [] and kb.get_task(conn, tid2).status == "ready"
+
+
+# --- t_78c2c417: macOS start-time drift reported live workers as crashed ---------------------------
+
+def test_spawn_fingerprint_format_round_trips_through_liveness(board, monkeypatch):
+    """The value written at spawn is exactly what the liveness check parses: ``<epoch>|<int>``. On
+    macOS the epoch is empty, giving ``'|<digits>'``. That is valid and must read as alive."""
+    import gateway.drain_control as dc
+    monkeypatch.setattr(dc, "current_instantiation_epoch", lambda: "")
+    fp = kbd._process_fingerprint(os.getpid())
+    epoch, sep, start = fp.rpartition("|")
+    assert sep == "|" and epoch == "" and start.isdigit()
+    assert kbd._worker_alive(os.getpid(), fp) is True
+
+
+@pytest.mark.parametrize("drift", [-150, -100, 0, 100, 150])
+def test_live_worker_with_boottime_drift_is_not_crashed(board, monkeypatch, drift):
+    """The 2026-10-20 evidence: spawn recorded '|179251158679', and a later read gave
+    '|179251158579' (1 s drift in psutil create_time from kern.boottime). That's still our worker."""
+    import gateway.status as gs
+    base = 179251158679
+    monkeypatch.setattr(gs, "get_process_start_time", lambda pid: base + drift)
+    import gateway.drain_control as dc
+    monkeypatch.setattr(dc, "current_instantiation_epoch", lambda: "")
+    assert kbd._worker_alive(os.getpid(), f"|{base}") is True
+    assert kbd._pid_recycled(os.getpid(), f"|{base}") is False
+    assert kbd._worker_alive(os.getpid(), base) is True  # legacy integer rows too
+
+
+def test_reused_pid_far_from_spawn_time_is_still_foreign(board, monkeypatch):
+    import gateway.status as gs
+    import gateway.drain_control as dc
+    base = 179251158679
+    monkeypatch.setattr(dc, "current_instantiation_epoch", lambda: "")
+    monkeypatch.setattr(gs, "get_process_start_time", lambda pid: base + 60_000)  # 10 min later
+    assert kbd._worker_alive(os.getpid(), f"|{base}") is False
+    assert kbd._worker_alive(os.getpid(), base) is False
+
+
+def test_drifted_start_on_another_epoch_is_foreign(board, monkeypatch):
+    import gateway.status as gs
+    import gateway.drain_control as dc
+    monkeypatch.setattr(dc, "current_instantiation_epoch", lambda: "boot-B:1")
+    monkeypatch.setattr(gs, "get_process_start_time", lambda pid: 1000)
+    assert kbd._worker_alive(os.getpid(), "boot-A:1|1000") is False
+
+
+def test_dead_pid_is_crashed_regardless_of_fingerprint(board):
+    assert kbd._worker_alive(2**22 + 12345, "|179251158679") is False
+
+
+def test_live_drifted_worker_is_not_released_by_dispatcher(board, monkeypatch):
+    import gateway.status as gs
+    import gateway.drain_control as dc
+    base = 179251158679
+    monkeypatch.setattr(dc, "current_instantiation_epoch", lambda: "")
+    monkeypatch.setattr(gs, "get_process_start_time", lambda pid: base - 100)
+    conn = board
+    tid = _claimed_running(conn, pid=os.getpid(), started_at=f"|{base}")
+    killed = []
+    kb.release_stale_claims(conn, signal_fn=lambda pid, sig: killed.append((pid, sig)))
+    assert killed == []
+    task = kb.get_task(conn, tid)
+    assert task.status == "running" and task.worker_pid == os.getpid()
