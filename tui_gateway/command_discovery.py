@@ -155,6 +155,8 @@ def _catalog_registry(cat: _Catalog, module_loader) -> None:
 
 
 def _catalog_quick_commands(cat: _Catalog, load_cfg) -> None:
+    from hermes_cli.commands_completion import quick_command_description
+
     qcmds = load_cfg().get("quick_commands", {}) or {}
     if not (isinstance(qcmds, dict) and qcmds):
         return
@@ -162,10 +164,7 @@ def _catalog_quick_commands(cat: _Catalog, load_cfg) -> None:
     for qname, qc in sorted(qcmds.items()):
         if not isinstance(qc, dict):
             continue
-        qtype = qc.get("type", "")
-        default_desc = {"exec": f"exec: {qc.get('command', '')}", "alias": f"alias → {qc.get('target', '')}"}
-        desc = str(qc.get("description") or default_desc.get(qtype, qtype or "quick command"))
-        cat.add(f"/{qname}", desc, "User commands")
+        cat.add(f"/{qname}", quick_command_description(qc), "User commands")
 
 
 def _catalog_plugin_commands(cat: _Catalog, module_loader) -> None:
@@ -250,7 +249,7 @@ def command_catalog(load_cfg=None, module_loader=import_module, scope=None) -> d
         "plugin_commands": cat.plugin_commands}
 
 
-def slash_completions(text: str = "", scope=None) -> dict:
+def slash_completions(text: str = "", scope=None, load_cfg=None) -> dict:
     """``scope`` binds the calling session's profile and workspace around the skill/bundle lookups
     (home- and cwd-keyed) so the popup offers the project-local skills ``command.dispatch`` accepts
     for that session (#114359)."""
@@ -261,10 +260,18 @@ def slash_completions(text: str = "", scope=None) -> dict:
     from prompt_toolkit.formatted_text import to_plain_text
     from agent.skill_commands import get_interactive_skill_commands
     from agent.skill_bundles import get_skill_bundles
+    if load_cfg is None:
+        from hermes_cli.config import load_config_readonly
+        load_cfg = load_config_readonly
     with scope if scope is not None else contextlib.nullcontext():
         skill_commands, skill_bundles = dict(get_interactive_skill_commands()), dict(get_skill_bundles())
+        # The profile's quick_commands are dispatchable by name, so offer them while typing too.
+        quick_commands = load_cfg().get("quick_commands") or {}
+    if not isinstance(quick_commands, dict):
+        quick_commands = {}
     completer = SlashCommandCompleter(
-        skill_commands_provider=lambda: skill_commands, skill_bundles_provider=lambda: skill_bundles)
+        skill_commands_provider=lambda: skill_commands, skill_bundles_provider=lambda: skill_bundles,
+        quick_commands_provider=lambda: quick_commands)
     # `kind` reaches the TUI as data (from the providers, not sniffed from ⚡/▣ glyphs):
     # skills/bundles are the only completions for an inline `/skill` typed mid-message.
     skill_names = {key.lstrip("/").lower() for key in (*skill_commands, *skill_bundles)}
