@@ -197,23 +197,28 @@ def _write(path: Path, record: dict[str, Any]) -> None:
 def deliver_to_live_owner(
     profile_home: Path | str, owner: dict[str, Any], message: str,
     *, delivery_id: str | None = None, author: dict[str, Any] | None = None,
-    notification_category: str = "result",
+    notification_category: str = "result", remote_channel: str = "",
 ) -> dict[str, Any]:
     """Return durable admission immediately, without waiting for the owner.
 
     Retry with the same id AND pinned owner/message to inspect the existing
     state. Reusing an id with a different payload is an error, never an overwrite.
+    ``remote_channel`` (e.g. "teams") marks a sender who cannot see desktop prompts: the
+    owner runs that turn with approval panels and clarify forms disabled.
     """
     pinned = _owner(profile_home, owner)
     if not isinstance(message, str):
         raise ValueError("message must be a string")
+    if not isinstance(remote_channel, str) or not re.fullmatch(r"[a-z0-9_-]{0,32}", remote_channel):
+        raise ValueError("remote_channel must be a short lowercase name")
     key = _delivery_id(delivery_id if delivery_id is not None else uuid.uuid4().hex)
     with _locked(profile_home) as root:
         path = root / f"{key}.json"
         existing = _read(path)
         if existing is not None:
             if (existing["owner"] != pinned or existing["message"] != message or existing.get("author") != author
-                    or existing.get("notification_category", "result") != notification_category):
+                    or existing.get("notification_category", "result") != notification_category
+                    or existing.get("remote_channel", "") != remote_channel):
                 raise ValueError("delivery id already belongs to a different payload")
             return existing
         record = dict(delivery_id=key, id=key, owner=pinned, **pinned,
@@ -221,6 +226,8 @@ def deliver_to_live_owner(
                       sequence=_next_sequence(root), **({"author": dict(author)} if author else {}))
         if notification_category == "diagnostic":
             record["notification_category"] = notification_category
+        if remote_channel:
+            record["remote_channel"] = remote_channel
         _write(path, record)
         return record
 

@@ -688,6 +688,10 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
                           reply=str(terminal.get("text") or "") if status == "settled" else "",
                           error=error, reason=reason)
 
+    # A phone-channel sender (Teams bridge) cannot see desktop panels: bind the remote marker so the
+    # turn thread (spawned under this context) denies-with-text instead of raising approval/clarify UI.
+    from tools.approval_context import reset_remote_human_context, set_remote_human_context
+    remote_token = set_remote_human_context(str(claimed.get("remote_channel") or ""))
     try:
         started = _run_prompt_submit(f"__bot_dm__{delivery_id}", sid, session, claimed["message"],
                                      image_paths=[], terminal_callback=terminal_receipt,
@@ -698,6 +702,8 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
         _notif_release_turn(session)
         terminal_receipt({"status": "failed", "error": str(exc)})
         raise
+    finally:
+        reset_remote_human_context(remote_token)
     if not started:
         _notif_release_turn(session)
         terminal_receipt({"status": "failed", "error": "live session owner could not start the delivery turn"})
