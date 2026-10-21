@@ -35,6 +35,26 @@ _approval_session_id: contextvars.ContextVar[str] = _ctx("approval_session_id")
 _hermes_interactive_ctx: contextvars.ContextVar[str | None] = _ctx("hermes_interactive", None)
 
 
+# Remote-human turn (t_1b19a76f): the person is on a phone channel (e.g. the Teams bridge) and cannot
+# answer a desktop approval panel or clarify form even though the turn runs inside a desktop session.
+# Value is the channel name ("teams"); "" = not remote. It only ever REDUCES what runs without a human.
+_remote_human_ctx: contextvars.ContextVar[str] = _ctx("remote_human_channel")
+
+
+def set_remote_human_context(channel: str) -> contextvars.Token:
+    """Mark this context's turn as driven by a remote human who cannot see desktop prompts."""
+    return _remote_human_ctx.set(str(channel or ""))
+
+
+def reset_remote_human_context(token: contextvars.Token) -> None:
+    _remote_human_ctx.reset(token)
+
+
+def remote_human_channel() -> str:
+    """Channel name of a remote-human turn, '' otherwise."""
+    return _remote_human_ctx.get() or ""
+
+
 def set_hermes_interactive_context(interactive: bool) -> contextvars.Token:
     """Bind interactive mode for the current context instead of mutating os.environ."""
     return _hermes_interactive_ctx.set("1" if interactive else "")
@@ -217,7 +237,7 @@ def _no_user_can_answer() -> bool:
     """True in single-query (-q), cron and unattended-platform sessions. `hermes chat -q` still registers the
     CLI panel callback, so a prompt that only checks for a callback would wait the full timeout for nobody."""
     return (_is_single_query_approval_context() or _is_cron_approval_context()
-            or _is_unattended_platform_approval_context())
+            or _is_unattended_platform_approval_context() or bool(remote_human_channel()))
 
 
 def _is_gateway_approval_context() -> bool:
@@ -362,6 +382,11 @@ def _get_cron_approval_mode() -> str:
 def _get_single_query_approval_mode() -> str:
     """Read the single-query (-q) approval mode from config. Returns 'deny' or 'approve'."""
     return _binary_approval_mode("single_query_mode")
+
+
+def _get_remote_approval_mode() -> str:
+    """Approval mode for remote-human turns (Teams bridge); default deny: the agent asks in text."""
+    return _binary_approval_mode("remote_mode")
 
 
 def _get_unattended_approval_mode() -> str:

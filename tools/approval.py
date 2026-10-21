@@ -636,11 +636,23 @@ _CRON_CTX = _Unattended(
 )
 
 
+def _remote_ctx(channel: str) -> _Unattended:
+    return _Unattended(
+        "remote", "remote_mode",
+        f"the user is on {channel} (phone) and cannot answer a desktop approval prompt. Do not retry it; "
+        "ask the user in your reply text what you want to run and why, or block the kanban card so they "
+        f"can answer 'approve t_xxxx' from {channel}",
+        "in remote-channel turns", "remote-channel turns are intentionally trusted",
+    )
+
+
 def _unattended_contexts() -> list[_Unattended]:
     """Active unattended contexts in evaluation order: single-query first (``hermes chat -q``
     exports HERMES_INTERACTIVE=1 but nobody answers); cron beats a platform marker because
     cron binds the platform for delivery routing only."""
     contexts = []
+    if channel := approval_context.remote_human_channel():
+        contexts.append(_remote_ctx(channel))  # first: a desktop panel would never be seen
     if _is_single_query_approval_context():
         contexts.append(_SINGLE_QUERY_CTX)
     if _is_cron_approval_context():
@@ -948,7 +960,8 @@ def _presence(approval_callback=None) -> tuple:
     approval_callback = _resolve_cli_approval_callback(approval_callback)
     is_cli, is_gateway = _is_interactive_cli(), _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
-    if _is_single_query_approval_context() or _is_cron_approval_context():
+    if (_is_single_query_approval_context() or _is_cron_approval_context()
+            or approval_context.remote_human_channel()):
         is_cli = is_gateway = is_ask = False
     elif is_ask and _is_unattended_platform_approval_context() \
             and (_gateway_notify_cb(get_current_session_key()) is None
@@ -999,7 +1012,7 @@ def _run_approval_gate(
         # Every unattended context resolves instantly — never a pending approval nobody can answer.
         deny_messages = {
             "single_query": single_query_deny_message, "cron": cron_deny_message,
-            "unattended": unattended_deny_message,
+            "unattended": unattended_deny_message, "remote": "",
         }
         for ctx in _unattended_contexts():
             if ctx.mode() == "deny":
