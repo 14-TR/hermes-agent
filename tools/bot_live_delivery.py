@@ -333,13 +333,19 @@ def _write(path: Path, record: dict[str, Any]) -> None:
 def deliver_to_live_owner(
     profile_home: Path | str, owner: dict[str, Any], message: str,
     *, delivery_id: str | None = None, author: dict[str, Any] | None = None,
-    notification_category: str = "result",
+    notification_category: str = "result", remote_channel: str = "",
 ) -> dict[str, Any]:
     """Return durable admission immediately, without waiting for the owner.
 
     Retry with the same id AND pinned owner/message to inspect the existing
     state. Reusing an id with a different payload is an error, never an overwrite.
+    ``remote_channel`` (e.g. "teams") marks a sender who cannot see desktop prompts. It is
+    validated but NOT yet forwarded: v0.22.5 admits Bot Chat turns through the authority's
+    ``bot_relay.deliver`` (gateway/session_bot.py), which has no remote-human marker yet, so the
+    approval/clarify suppression does not reach these turns (local port gap, t_4304c0c1).
     """
+    if not isinstance(remote_channel, str) or not re.fullmatch(r"[a-z0-9_-]{0,32}", remote_channel):
+        raise ValueError("remote_channel must be a short lowercase name")
     return _door(authority_delivery, profile_home, owner, message, delivery_id=delivery_id, author=author,
                  notification_category=notification_category)
 
