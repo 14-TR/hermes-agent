@@ -1046,6 +1046,31 @@ def _resume_eager(ctx: _Resume) -> dict:
         auto_continue=_maybe_schedule_auto_continue(sid, session, ctx.target) if session else None)
 
 
+def _claim_bot_chat_consumer(ctx: _Resume, resp: dict) -> dict:
+    """An OPEN canonical Bot Chat advertises itself as the profile's live-delivery consumer right away.
+
+    Ordinary chats claim their slot lazily on the first turn (``_ensure_active_session_slot``), but
+    ``tools.bot_live_delivery.find_canonical_live_owner`` only routes to a Bot Chat holding a lease with
+    ``bot_live_delivery_consumer``. Without an eager claim an idle open Bot Chat is invisible and every
+    webhook/mailbox delivery parks as "awaiting owner" (t_208f02b4). The registry keeps one entry per
+    session id, so other consumers (cron, DM, CLI, other desktop chats) co-exist with this lease and
+    cannot evict it. Best-effort: a refused or failed claim keeps the old lazy behaviour.
+    """
+    try:
+        if not _row_follows_profile(ctx.found):  # canonical Bot Chat (marker, or legacy exact title)
+            return resp
+        sid = ((resp or {}).get("result") or {}).get("session_id")
+        session = _sessions.get(sid) if sid else None
+        if session is None or session.get("active_session_lease") is not None:
+            return resp
+        refusal = _ensure_active_session_slot(sid, session)
+        if refusal is not None:
+            logger.info("Bot Chat live-consumer claim skipped for %s: %s", sid, refusal)
+    except Exception:
+        logger.debug("Bot Chat live-consumer claim failed", exc_info=True)
+    return resp
+
+
 @method("session.resume")
 def _(rid, params: dict) -> dict:
     if not (target := params.get("session_id", "")):
@@ -1072,8 +1097,8 @@ def _(rid, params: dict) -> dict:
         restore_session_yolo(ctx.target, SessionDB.session_yolo_enabled(ctx.found))
         if ctx.lazy:
             return _resume_lazy(ctx)
-        return _resume_eager(ctx) if ctx.eager_build else (
-            _resume_deferred(ctx) if ctx.defer_history else _resume_cold(ctx))
+        return _claim_bot_chat_consumer(ctx, _resume_eager(ctx) if ctx.eager_build else (
+            _resume_deferred(ctx) if ctx.defer_history else _resume_cold(ctx)))
     finally:
         # Refcounting alone does not release the sqlite fds: SessionDB pins ITSELF (atexit.register) once its
         # background token writer starts; only close() unregisters.
