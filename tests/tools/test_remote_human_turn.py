@@ -49,7 +49,12 @@ def test_execute_code_is_denied_without_a_panel(home, remote):
     assert "teams (phone)" in result["message"]
 
 
-def test_without_marker_the_desktop_panel_is_still_used(home):
+def test_without_marker_the_desktop_panel_is_still_used(home, monkeypatch):
+    # Hermetic: kanban workers / -q runs export these; the desktop-panel path needs a clean env.
+    import os
+    for var in [k for k in os.environ if k.startswith("HERMES_") and k != "HERMES_HOME"]:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     from tools.approval import check_all_command_guards
     from tools.approval_context import remote_human_channel
     assert remote_human_channel() == ""
