@@ -116,6 +116,11 @@ def clarify_tool(questions, callback: Optional[Callable] = None) -> str:
         return tool_error(error)
     if callback is None:
         return tool_error(_UNAVAILABLE)
+    from tools.approval_context import remote_human_channel
+    if channel := remote_human_channel():
+        return tool_error(
+            f"clarify is unavailable: the user is on {channel} (phone) and cannot see the form. "
+            "Ask the question in your reply text instead and end the turn; their next message is the answer.")
     from tools.human_input_hooks import human_input_request
     # Observers see the questions only; the answers stay in the tool result.
     with human_input_request("clarify", prompt="\n".join(q["question"] for q in normalized)) as human:
