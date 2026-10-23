@@ -235,7 +235,11 @@ def specify_task(
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Task ids in the triage column; ``tenant`` narrows the sweep."""
+    """Task ids in the triage column; ``tenant`` narrows the sweep.
+
+    Block-loop escalations (``block_recurrences >= BLOCK_RECURRENCE_LIMIT``)
+    stay parked for a human, matching the decomposer's picker (t_72f980ce).
+    """
     with kbc.connect_closing() as conn:
         tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
-    return [t.id for t in tasks]
+    return [t.id for t in tasks if (t.block_recurrences or 0) < kb.BLOCK_RECURRENCE_LIMIT]

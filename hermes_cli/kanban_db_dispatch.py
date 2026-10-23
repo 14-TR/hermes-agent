@@ -1678,6 +1678,13 @@ def _is_handoff_event(kind: str, payload: Optional[str]) -> bool:
     return bool(to) and "from" in data and data["from"] != to
 
 
+# Profiles the dispatcher must never spawn as card workers: their guard hooks
+# forbid kanban_complete, so a spawned run can only block (t_ec48f604 looped
+# 18x). Cards assigned here park in ``ready`` under ``skipped_nonspawnable``
+# with a per-task event until a human reassigns them.
+NON_DISPATCHABLE_ASSIGNEES: frozenset = frozenset({"big"})
+
+
 def _profile_exists_fn() -> Optional[Callable[[str], bool]]:
     """``hermes_cli.profiles.profile_exists``, or ``None`` when it cannot be
     imported (local import avoids a cycle; callers fall back to trusting the
@@ -1693,15 +1700,19 @@ def _profile_exists_fn() -> Optional[Callable[[str], bool]]:
     except Exception:
         return None
     allowlist = _dispatch_profile_allowlist(normalize_profile_name)
-    if allowlist is None:
-        return profile_exists
 
     def _gated(name: str) -> bool:
         try:
             canon = normalize_profile_name(name)
         except ValueError:
             return False
-        return canon in allowlist and bool(profile_exists(name))
+        # Control-plane profiles (BIG) can never close a card — spawning one
+        # on a card only produces block -> triage -> re-promote loops (t_72f980ce).
+        if canon in NON_DISPATCHABLE_ASSIGNEES:
+            return False
+        if allowlist is not None and canon not in allowlist:
+            return False
+        return bool(profile_exists(name))
 
     return _gated
 
