@@ -1220,6 +1220,9 @@ def create_task(
     )
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
+    # Fleet goal-mode switch (t_5c87cbd3): Size M/L cards become goal-mode while enabled.
+    from hermes_cli.fleet_goal import apply_policy as _fleet_goal_policy
+    goal_mode, goal_max_turns, fleet_goal_applied = _fleet_goal_policy(body, goal_mode, goal_max_turns)
 
     # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
     # race may insert twice, the next lookup stabilises on the newest.
@@ -1297,6 +1300,7 @@ def create_task(
                         "project_id": project_id,
                         "skills": list(skills_list) if skills_list else None,
                         "goal_mode": bool(goal_mode) or None,
+                        "fleet_goal": fleet_goal_applied or None,
                         "model_override": model_override,
                         "provider_override": provider_override,
                     },
