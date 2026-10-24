@@ -308,7 +308,8 @@ def automation_display_metadata(metadata):
 # proof at execution from the target the pre-claim check validated, and the turn's resolver reads it.
 _AUTOMATION_METADATA = frozenset({'gateway_session_key', 'gateway_session_id', 'automation_identities',
     'turn_author', 'notification_origin', 'original_trigger_message_id', 'notification_category',
-    'display_kind', 'display_text', 'gateway_proven_session_id', 'gateway_completion_ids', 'heartbeat_tick'})
+    'display_kind', 'display_text', 'gateway_proven_session_id', 'gateway_completion_ids', 'heartbeat_tick',
+    'remote_human_channel'})
 
 
 def admission_display(payload):
@@ -422,6 +423,8 @@ def snapshot_local_automation(authority, adapter, event, identity, entry):
         descriptor['turn_author'] = parse_turn_author(event.metadata['turn_author'])
         if descriptor['turn_author'] is None:
             raise RuntimeStoreError('invalid_params')
+    if event.metadata.get('remote_human_channel'):
+        descriptor['remote_human_channel'] = str(event.metadata['remote_human_channel'])
     if event.metadata.get('automation_identities'):
         descriptor['identities'] = sorted(set(event.metadata['automation_identities']))
     if getattr(event, '_heartbeat_session_id', None):
@@ -457,6 +460,8 @@ def restore_local_automation(authority, ref, row):
     event.metadata.update(automation_display_metadata(descriptor))
     if descriptor.get('turn_author') is not None:
         event.metadata['turn_author'] = deepcopy(descriptor['turn_author'])
+    if descriptor.get('remote_human_channel'):
+        event.metadata['remote_human_channel'] = descriptor['remote_human_channel']
     if descriptor.get('heartbeat'):
         event._heartbeat_session_id = descriptor['heartbeat']
     return event

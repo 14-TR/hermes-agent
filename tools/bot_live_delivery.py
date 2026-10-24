@@ -339,15 +339,14 @@ def deliver_to_live_owner(
 
     Retry with the same id AND pinned owner/message to inspect the existing
     state. Reusing an id with a different payload is an error, never an overwrite.
-    ``remote_channel`` (e.g. "teams") marks a sender who cannot see desktop prompts. It is
-    validated but NOT yet forwarded: v0.22.5 admits Bot Chat turns through the authority's
-    ``bot_relay.deliver`` (gateway/session_bot.py), which has no remote-human marker yet, so the
-    approval/clarify suppression does not reach these turns (local port gap, t_4304c0c1).
+    ``remote_channel`` (e.g. "teams") marks a sender who cannot see desktop prompts: the
+    authority (``bot_relay.deliver``) carries it onto the admitted turn, which then never raises
+    a desktop approval panel or clarify form (t_1b19a76f, re-ported to v0.22.5 in t_6b17b252).
     """
     if not isinstance(remote_channel, str) or not re.fullmatch(r"[a-z0-9_-]{0,32}", remote_channel):
         raise ValueError("remote_channel must be a short lowercase name")
     return _door(authority_delivery, profile_home, owner, message, delivery_id=delivery_id, author=author,
-                 notification_category=notification_category)
+                 notification_category=notification_category, remote_channel=remote_channel)
 
 
 def settle_held_delivery(profile_home: Path | str, owner: dict[str, Any], message: str, *, delivery_id: str,
@@ -358,7 +357,7 @@ def settle_held_delivery(profile_home: Path | str, owner: dict[str, Any], messag
 
 
 def _door(call: Callable[[Path, dict], dict], profile_home, owner, message, *, delivery_id=None, author=None,
-          notification_category="result"):
+          notification_category="result", remote_channel=""):
     pinned = _owner(profile_home, owner)
     if not isinstance(message, str):
         raise ValueError("message must be a string")
@@ -371,7 +370,8 @@ def _door(call: Callable[[Path, dict], dict], profile_home, owner, message, *, d
     return {**call(home, dict(id=_delivery_id(delivery_id if delivery_id is not None else uuid.uuid4().hex),
         profile=home.name if home.parent.name == "profiles" else "default",
         message=message, **({"session_id": pinned["session_id"]} if pinned["session_id"] else {}),
-        **({"author": dict(author)} if author else {}), **category)), **category}
+        **({"author": dict(author)} if author else {}),
+        **({"remote_channel": remote_channel} if remote_channel else {}), **category)), **category}
 
 
 def owner_holds_delivery(profile_home: Path | str, record: dict) -> bool:

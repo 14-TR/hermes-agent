@@ -6,6 +6,7 @@ admission is the only consumer; unknown execution is never retried as inference.
 import asyncio
 from functools import partial
 import logging
+import re
 from pathlib import Path
 import time
 
@@ -531,6 +532,8 @@ async def _maybe_retry(authority, home, path, record):
     event.metadata.update(automation_notification_metadata(record))
     if record.get('author') is not None:
         event.metadata['turn_author'] = dict(record['author'])
+    if record.get('remote_channel'):
+        event.metadata['remote_human_channel'] = record['remote_channel']
     record['retry'] = {'identity': identity}
     record.update(status='queued', reply='')
     await write_receipt(home, record)
@@ -636,7 +639,8 @@ async def _migrate(authority, actor, home, root):
             continue
         await _admit(authority, actor, home, root, _delivery_id(record['delivery_id']),
                      record['message'], ref, live, entry, author=parse_turn_author(record.get('author')), legacy=record,
-                     notification_category=record.get('notification_category', 'result'))
+                     notification_category=record.get('notification_category', 'result'),
+                     **({'remote_channel': record['remote_channel']} if record.get('remote_channel') else {}))
 
 
 async def recover_bot_deliveries(authority):
@@ -703,12 +707,25 @@ async def deliver(connection, params):
     return await asyncio.shield(track_mutation(connection.authority, _deliver(connection, params)))
 
 
-def _require_same_delivery(record, actor, message, author, category):
+_REMOTE_CHANNEL = re.compile(r'[a-z0-9_-]{1,32}')
+
+
+def _remote_channel(params):
+    """A remote-human sender's channel ("teams"), '' otherwise (t_1b19a76f): its turn never raises
+    a desktop approval/clarify prompt. It only ever reduces what runs without a human."""
+    channel = params.get('remote_channel', '')
+    if channel and (not isinstance(channel, str) or not _REMOTE_CHANNEL.fullmatch(channel)):
+        raise RuntimeStoreError('invalid_params')
+    return channel or ''
+
+
+def _require_same_delivery(record, actor, message, author, category, remote=''):
     """A delivery id names one delivery: the same message, principal, author and category (the
     mailbox writer's identity), whether its receipt is admission-backed or refused."""
     if (record['message'] != message or record['principal_id'] != actor.subject
             or record.get('author') != author
-            or record.get('notification_category', 'result') != category):
+            or record.get('notification_category', 'result') != category
+            or record.get('remote_channel', '') != remote):
         raise RuntimeStoreError('admission_conflict')
 
 
@@ -716,7 +733,7 @@ def _delivery_params(authority, actor, params):
     """``(home, key, message, author, category)`` of one ``deliver``/``settle`` request: the
     delivery's full identity, validated the same way for both verbs."""
     home = _home(authority, actor, params.get('profile'))
-    if set(params) - {'id', 'profile', 'message', 'session_id', 'author', 'notification_category'}:
+    if set(params) - {'id', 'profile', 'message', 'session_id', 'author', 'notification_category', 'remote_channel'}:
         raise RuntimeStoreError('invalid_params')
     from gateway.session_automation import automation_notification_metadata
     notification = automation_notification_metadata(params)
@@ -735,7 +752,7 @@ def _delivery_params(authority, actor, params):
     author = parse_turn_author(params.get('author'))
     if params.get('author') is not None and (not isinstance(params['author'], dict) or author is None):
         raise RuntimeStoreError('invalid_params')
-    return home, key, message, author, category
+    return home, key, message, author, category, _remote_channel(params)
 
 
 def _refused_answer(record):
@@ -760,8 +777,8 @@ async def _receipt_answer(authority, actor, home, record, identity, retry_path=N
 
 async def _deliver(connection, params):
     authority, actor = connection.authority, connection.actor
-    home, key, message, author, category = _delivery_params(authority, actor, params)
-    identity = (message, author, category)
+    home, key, message, author, category, remote = _delivery_params(authority, actor, params)
+    identity = (message, author, category, remote)
     authority._require_admission_open()
     async with mailbox_lock(authority):
         root, record = await read_receipt(home, key)
@@ -783,7 +800,7 @@ async def _deliver(connection, params):
             if pinned != entry.session_id and not _moved_aside_by_this_door(authority, holder, pinned):
                 raise RuntimeStoreError('admission_conflict')
             return await _admit(authority, actor, home, root, key, message, ref, live, entry, author=author,
-                                notification_category=category)
+                                notification_category=category, remote_channel=remote)
         except RuntimeStoreError as exc:
             raise await _held_by_another_writer(home, key, exc) or exc
 
@@ -814,21 +831,21 @@ async def _settle(connection, params):
     ``session:submit`` principal of the profile can settle an id it never delivered: the trust
     ``deliver`` already grants it over that id."""
     authority, actor = connection.authority, connection.actor
-    home, key, message, author, category = _delivery_params(authority, actor, params)
+    home, key, message, author, category, remote = _delivery_params(authority, actor, params)
     async with mailbox_lock(authority):
         _, record = await read_receipt(home, key)
         if record is None:
-            record = _not_sent_record(authority, actor, home, key, message, author, category)
+            record = _not_sent_record(authority, actor, home, key, message, author, category, remote)
             await write_receipt(home, record)
             logging.getLogger(__name__).info('Bot Chat delivery %s settled as not sent (%s)', key, record['reason'])
-        _require_same_delivery(record, actor, message, author, category)
-        answer = await _receipt_answer(authority, actor, home, record, (message, author, category))
+        _require_same_delivery(record, actor, message, author, category, remote)
+        answer = await _receipt_answer(authority, actor, home, record, (message, author, category, remote))
         if answer is None:
             raise RuntimeStoreError('unknown_execution')
         return answer
 
 
-def _not_sent_record(authority, actor, home, key, message, author, category):
+def _not_sent_record(authority, actor, home, key, message, author, category, remote=''):
     """The never-admitted id's terminal receipt, in ``refuse_pin``'s shape. Refuses (unknown) when
     the FIFO holds a ``bot:<id>`` row anyway or there is no Bot Chat to name."""
     with authority.db._read_ctx() as conn:
@@ -843,6 +860,8 @@ def _not_sent_record(authority, actor, home, key, message, author, category):
     record.update(automation_notification_metadata({'notification_category': category}))
     if author is not None:
         record['author'] = dict(author)
+    if remote:
+        record['remote_channel'] = remote
     return record
 
 
@@ -863,7 +882,7 @@ async def _held_by_another_writer(home, key, exc):
 
 
 async def _admit(authority, actor, home, root, key, message, ref, live, entry, author=None, legacy=None,
-                 notification_category='result'):
+                 notification_category='result', remote_channel=''):
     from gateway.session_automation import automation_notification_metadata
     notification = automation_notification_metadata({'notification_category': notification_category})
     path = root / f'{key}.json'
@@ -873,6 +892,8 @@ async def _admit(authority, actor, home, root, key, message, ref, live, entry, a
     event.metadata.update(notification)
     if author is not None:
         event.metadata['turn_author'] = dict(author)
+    if remote_channel:
+        event.metadata['remote_human_channel'] = remote_channel
     # Pin the physical target before committing. A process death in this
     # two-store window leaves an explicit unknown record, never a new target.
     record = dict(legacy or {}, delivery_id=key, profile_home=str(home), session_id=ref.session_id,
@@ -882,6 +903,8 @@ async def _admit(authority, actor, home, root, key, message, ref, live, entry, a
         record['operator'] = True  # admitted on operator access: its one retry keeps it (``_maybe_retry``)
     if author is not None:
         record['author'] = dict(author)
+    if remote_channel:
+        record['remote_channel'] = remote_channel
     # Preserve a foreign cancellation or claim that won after our legacy scan.
     if not await write_receipt(home, record, expect=(legacy or {}).get('status')):
         if legacy is not None:

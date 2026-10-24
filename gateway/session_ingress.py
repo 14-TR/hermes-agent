@@ -270,6 +270,9 @@ async def execute_admission(authority, ref, row):
         event._claimed_owner = (ref.session_id, row['generation'])
     author = event.metadata.get('turn_author')
     author_token = admission_author.set(author if author is not None else row_turn_author(local_policy, row))
+    # A remote-human turn (Teams/phone Bot Chat delivery) never raises desktop approval/clarify (t_1b19a76f).
+    from tools.approval_context import reset_remote_human_context, set_remote_human_context
+    remote_token = set_remote_human_context(str(event.metadata.get('remote_human_channel') or ''))
     from gateway.session_operator import is_viewer_input
     viewer_token = viewer_turn.set(live if is_viewer_input(row) else None)
     api_token = api_execution.set(None)
@@ -332,6 +335,7 @@ async def execute_admission(authority, ref, row):
         execution_result.reset(result_token)
         api_execution.reset(api_token)
         admission_author.reset(author_token)
+        reset_remote_human_context(remote_token)
         viewer_turn.reset(viewer_token)
 
 
