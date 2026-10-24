@@ -1976,17 +1976,102 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
     return total
 
 
+# LOCAL PATCH (t_b16701f6): macOS memory-pressure source. /proc is Linux-only,
+# so on Darwin the guard above always read "unknown" and never restricted.
+# Kernel level (kern.memorystatus_vm_pressure_level): 1=NORMAL, 2=WARN, 4=CRITICAL.
+_DARWIN_KERNEL_LEVELS = {1: "ok", 2: "elevated", 4: "critical"}
+MEMORY_GUARD_MIN_FREE_PCT_DEFAULT = 15
+
+
+def _kanban_cfg() -> Mapping[str, Any]:
+    try:
+        from hermes_cli.config import load_config_readonly
+        return (load_config_readonly() or {}).get("kanban", {}) or {}
+    except Exception:
+        return {}
+
+
+def _darwin_pressure_sample() -> Optional[dict]:
+    """``{"kernel_level", "free_pct"}`` on macOS, ``None`` elsewhere/on error.
+
+    ``free_pct`` = (free + inactive + speculative + purgeable pages) / hw.memsize.
+    Test seam: conftest patches this to ``None`` like ``_system_memory_sample``.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        def _run(*cmd: str) -> str:
+            return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=3, check=True).stdout
+        level = int(_run("sysctl", "-n", "kern.memorystatus_vm_pressure_level").strip())
+        total = int(_run("sysctl", "-n", "hw.memsize").strip())
+        vm = _run("vm_stat")
+        m = re.search(r"page size of (\d+) bytes", vm)
+        page = int(m.group(1)) if m else 16384
+        pages = 0
+        for key in ("free", "inactive", "speculative", "purgeable"):
+            m = re.search(rf"^Pages {key}:\s+(\d+)", vm, re.MULTILINE)
+            if m:
+                pages += int(m.group(1))
+        free_pct = (pages * page * 100.0 / total) if total > 0 else None
+        return {"kernel_level": level, "free_pct": free_pct}
+    except Exception:
+        return None
+
+
+def _darwin_pressure_level(sample: Mapping[str, Any], min_free_pct: Optional[float] = None) -> str:
+    """Map a Darwin sample to ok/elevated/critical. Low free% (< min_free_pct,
+    default ``kanban.memory_guard_min_free_pct`` or 15; 0 disables) counts as elevated."""
+    level = _DARWIN_KERNEL_LEVELS.get(sample.get("kernel_level"), "unknown")
+    if level == "critical":
+        return level
+    if min_free_pct is None:
+        try:
+            min_free_pct = float(_kanban_cfg().get("memory_guard_min_free_pct", MEMORY_GUARD_MIN_FREE_PCT_DEFAULT))
+        except (TypeError, ValueError):
+            min_free_pct = MEMORY_GUARD_MIN_FREE_PCT_DEFAULT
+    free_pct = sample.get("free_pct")
+    if min_free_pct and isinstance(free_pct, (int, float)) and free_pct < min_free_pct:
+        return "elevated"
+    return level
+
+
+def _alert_critical_pressure(conn: sqlite3.Connection, detail: str) -> Optional[str]:
+    """LOCAL PATCH (t_b16701f6): create one alert card for
+    ``kanban.memory_guard_alert_assignee`` (unset = no alert), at most one per
+    hour via idempotency key. Never kills workers. Fails silent."""
+    assignee = str(_kanban_cfg().get("memory_guard_alert_assignee") or "").strip()
+    if not assignee:
+        return None
+    try:
+        hour = time.strftime("%Y%m%d%H")
+        return _kb.create_task(
+            conn, title="ALERT: host memory pressure CRITICAL — kanban dispatch paused",
+            body=("The kanban dispatcher observed CRITICAL memory pressure and is spawning no new "
+                  f"workers until it drops. Running workers were NOT killed.\n\nSample: {detail}\n\n"
+                  "Triage: check Activity Monitor / `memory_pressure`; consider stopping a worker manually."),
+            assignee=assignee, created_by="kanban-memory-guard", priority=10,
+            idempotency_key=f"kanban-memory-critical-{hour}", initial_status="blocked",
+        )
+    except Exception as exc:
+        _kb._log.warning("kanban dispatch: failed to post memory-pressure alert: %s", exc)
+        return None
+
+
 def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
     """Classify system memory pressure: ok/elevated/critical/unknown.
 
     Reuses :func:`gateway.memory_status.classify_pressure` so "critical" matches
     the dashboard banner and lifecycle-ledger OOM heuristics. ``unknown``
     (non-Linux, read failure) imposes no restriction — never brick dispatch
-    where /proc is unavailable.
+    where /proc is unavailable. LOCAL PATCH: on macOS falls back to
+    :func:`_darwin_pressure_sample`.
     """
     if sample is None:
         sample = _system_memory_sample()
     if not sample:
+        darwin = _darwin_pressure_sample()
+        if darwin:
+            return _darwin_pressure_level(darwin)
         return "unknown"
     try:
         from gateway.memory_status import classify_pressure
@@ -2298,6 +2383,15 @@ def _tick_spawn_budget(
         _kb._log.warning(
             "kanban dispatch: system memory pressure is critical; "
             "spawning no new workers this tick (deferred, not dropped)"
+        )
+        _alert_critical_pressure(conn, repr(_darwin_pressure_sample() or _system_memory_sample()))
+        return False, None
+    if pressure == "elevated" and _kanban_cfg().get("memory_guard_block_on_elevated"):
+        # LOCAL PATCH (t_b16701f6): opt-in strict mode — WARN pauses spawning entirely.
+        result.memory_pressure = pressure
+        _kb._log.warning(
+            "kanban dispatch: system memory pressure is elevated and "
+            "kanban.memory_guard_block_on_elevated is set; spawning no new workers this tick"
         )
         return False, None
     if pressure == "elevated":
