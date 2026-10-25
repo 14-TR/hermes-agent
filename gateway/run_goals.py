@@ -146,11 +146,16 @@ class GatewayGoalsMixin:
             session_id = current
             watch[quick_key] = (source, session_id)
         adapter = self._delivery_adapter_for(source)
-        if adapter is None or not adapter._message_handler:
+        if adapter is None:
             return
         if getattr(self, 'session_authority', None) is not None:
+            # The authority FIFO runs the turn, not ``adapter.handle_message``: a LOCAL route's
+            # LocalSessionAdapter never gets a message handler, so gating on one stranded every
+            # Desktop /heartbeat armed-but-never-fired (t_c1764656).
             from gateway.run_heartbeat_acceptance import admit_heartbeat
             await admit_heartbeat(self, adapter, source, session_id, quick_key)
+            return
+        if not adapter._message_handler:
             return
         if (
             self._is_session_running(quick_key)

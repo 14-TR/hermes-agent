@@ -61,6 +61,19 @@ async def admit_heartbeat(runner, adapter, source, session_id, route):
     if any(row['payload'].get('native_text_v1', {}).get('automation', {}).get('heartbeat')
            or row['payload'].get('local_automation_v1', {}).get('heartbeat') for row in pending):
         return
+    from gateway.config import Platform
+    if source.platform == Platform.LOCAL:
+        # ``snapshot_local_automation`` admits only the live session's own source object; the
+        # watch holds a routing-index restore or the slash event's copy (t_c1764656). Mirror
+        # ``admit_route_wake``: ride the live owner of this route, else leave the tick due.
+        live = authority.sessions.get(source.chat_id)
+        if live is None or live.route != route:
+            from gateway.session_automation import _local_owner
+            ref = _local_owner(authority, route)
+            live = authority.sessions.get(ref.session_id) if ref is not None else None
+        if live is None or live.source is None:
+            return
+        source = live.source
     manager = HeartbeatManager(session_id)
     prompt = manager.due_prompt()
     if prompt is None:
