@@ -155,8 +155,13 @@ class GatewayGoalsMixin:
         if local and viewer_driven(adapter.authority, source.chat_id, "viewer_heartbeat"):
             return  # the classic CLI's watchdog fires it: that CLI paints only the turns it submits
         if getattr(self, 'session_authority', None) is not None:
+            # The authority FIFO runs the turn, not ``adapter.handle_message``: a LOCAL route's
+            # LocalSessionAdapter never gets a message handler, so gating on one stranded every
+            # Desktop /heartbeat armed-but-never-fired (t_c1764656).
             from gateway.run_heartbeat_acceptance import admit_heartbeat
             await admit_heartbeat(self, adapter, source, session_id, quick_key)
+            return
+        if not adapter._message_handler:
             return
         if (
             self._is_session_running(quick_key)
