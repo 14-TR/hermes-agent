@@ -274,7 +274,10 @@ class ManagedWorker:
             stopper.cancel()
             arrived.cancel()
 
-    def interrupt(self):
+    def interrupt(self, message=None):
+        # ``message`` is accepted (and ignored) so the agent-shaped call made by
+        # agent.interrupt_compat.request_hard_interrupt during gateway shutdown does not raise
+        # TypeError and abort stop_authority_work, which leaves the runtime draining (t_44279928).
         self.control({'type': 'stop'})
 
     def respond(self, kind, prompt_id, value):
