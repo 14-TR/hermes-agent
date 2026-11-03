@@ -2548,6 +2548,13 @@ def cmd_dashboard(args):
     _token_file = getattr(args, "ssh_session_token_file", None)
     _dashboard_lifecycle_flags(args, _token_file)
 
+    # A dashboard/desktop backend is a user surface that can outlive the worker
+    # or delegate descendant which launched it.  Cross that host boundary before
+    # routing/re-exec or importing server code; ordinary child spawns stay fenced.
+    from agent.delegation_context import clear_user_surface_worker_env
+
+    clear_user_surface_worker_env()
+
     # `serve` is the headless backend: no UI build, no SPA mount, neutral
     # ready sentinel. Resolved once and threaded through the re-exec, the
     # build gate, and start_server.
