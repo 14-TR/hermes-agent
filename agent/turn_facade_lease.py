@@ -29,6 +29,9 @@ LEASE_WAIT_SECONDS = 1800.0
 _REFRESH_WRITE_PATIENCE_S = 20.0
 # Headroom before expiry for one BEGIN IMMEDIATE blocked in the writer's 1s busy handler, plus jitter.
 _REFRESH_EXPIRY_MARGIN_S = 2.0
+# Wall-clock time that elapsed without matching monotonic time (macOS: monotonic pauses in system
+# sleep). Past this, a lapsed authority is attributed to host suspend, not to a lock stall (t_cacd2a95).
+_SUSPEND_GAP_THRESHOLD_S = 30.0
 
 
 class DurableTurnLease:
@@ -55,6 +58,7 @@ class DurableTurnLease:
         self.interrupt_message: Optional[str] = None
         self.watchdog = None  # TurnLivenessWatchdog when configured
         self.timer_handles: list = []  # periodic_scheduler handles, cancelled in join_threads
+        self._clock_mark = (time.time(), time.monotonic())
 
     def _current_session_id(self) -> str:
         return getattr(self.agent, "session_id", None) or self.session_id
@@ -198,6 +202,35 @@ class DurableTurnLease:
         self._interrupt_turn("Session turn lease could not be refreshed; stopping to protect the transcript.")
         return False
 
+    def _consume_suspend_gap(self) -> float:
+        """Seconds of wall clock that passed without monotonic time since the last tick (host sleep)."""
+        wall, mono = time.time(), time.monotonic()
+        prev_wall, prev_mono = self._clock_mark
+        self._clock_mark = (wall, mono)
+        return max(0.0, (wall - prev_wall) - (mono - prev_mono))
+
+    def _renew_after_suspend(self, started: float):
+        """The host slept through the renewal window, so no tick could run. The UPDATE is fenced on
+        ``holder``: if a successor reclaimed the expired row, rowcount is 0 and the turn stops as
+        a lost lease. If not, nobody else owns the session and the turn continues."""
+        try:
+            renewed = self.db.refresh_session_turn_lease(
+                self._current_session_id(), self.holder, ttl_seconds=LEASE_TTL_SECONDS,
+                patience_s=_REFRESH_WRITE_PATIENCE_S,
+            )
+        except Exception:
+            logger.warning("Post-suspend lease renewal failed: %s", self._current_session_id(), exc_info=True)
+            renewed = False
+        if renewed:
+            self._authority_deadline = started + LEASE_TTL_SECONDS
+            logger.info("Session turn lease renewed after host suspend: %s", self._current_session_id())
+            return None
+        if self.stop.is_set():
+            return False
+        logger.error("Session turn lease lost during host suspend: %s", self._current_session_id())
+        self._interrupt_turn("Session turn lease lost; stopping to protect the transcript.")
+        return False
+
     def refresh_tick(self):
         """One periodic renewal (every ``refresh_interval`` via the shared scheduler). A real
         miss (rowcount 0) or a non-lock error interrupts the turn. A SQLite lock is a missed
@@ -215,11 +248,14 @@ class DurableTurnLease:
         if self.stop.is_set():
             return False
         started = time.time()
+        suspend_gap = self._consume_suspend_gap()
         # The whole renewal must finish before the authority runs out: a renewal still waiting on the
         # write lock past expiry keeps this turn running while a successor reclaims the row. The
         # margin covers one BEGIN IMMEDIATE that blocks in SQLite's busy handler past the patience.
         patience = self._authority_deadline - _REFRESH_EXPIRY_MARGIN_S - started
         if patience <= 0:
+            if suspend_gap >= _SUSPEND_GAP_THRESHOLD_S:
+                return self._renew_after_suspend(started)
             return self._stop_on_exhausted_authority()
         try:
             if self.db.refresh_session_turn_lease(

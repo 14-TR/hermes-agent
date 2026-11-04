@@ -264,3 +264,53 @@ def test_interrupt_turn_only_while_active():
     assert calls == ["lost"] and lease.interrupt_message == "lost"
     lease.deactivate_after_liveness_abort()
     assert lease.stop.is_set() and lease.is_turn_active() is False
+
+
+# --- Host suspend (t_cacd2a95): a sleeping Mac must not be mistaken for an exhausted lease ---
+
+class _SuspendDb:
+    def __init__(self, renew):
+        self.renew = renew
+        self.calls = 0
+
+    def refresh_session_turn_lease(self, session_id, holder, **kwargs):
+        self.calls += 1
+        return self.renew
+
+
+def _suspended_lease(monkeypatch, db, gap_s):
+    import agent.turn_facade_lease as mod
+
+    interrupts = []
+    agent = _agent(db)
+    agent.interrupt = lambda msg, **kw: interrupts.append(msg)
+    lease = DurableTurnLease(agent, db, "s1", "h1", expires_at=1000.0)
+    lease.turn_active = True
+    lease._clock_mark = (700.0, 50.0)
+    # Wall clock jumped 400s past the deadline, monotonic advanced only (400 + 300 - gap)s.
+    monkeypatch.setattr(mod.time, "time", lambda: 1100.0)
+    monkeypatch.setattr(mod.time, "monotonic", lambda: 50.0 + 400.0 - gap_s)
+    return lease, interrupts
+
+
+def test_suspend_gap_renews_held_lease_instead_of_interrupting(monkeypatch):
+    db = _SuspendDb(renew=True)
+    lease, interrupts = _suspended_lease(monkeypatch, db, gap_s=380.0)
+    assert lease.refresh_tick() is None
+    assert interrupts == [] and db.calls == 1
+    assert lease._authority_deadline == 1100.0 + LEASE_TTL_SECONDS
+
+
+def test_suspend_gap_with_reclaimed_row_still_interrupts(monkeypatch):
+    db = _SuspendDb(renew=False)
+    lease, interrupts = _suspended_lease(monkeypatch, db, gap_s=380.0)
+    assert lease.refresh_tick() is False
+    assert interrupts == ["Session turn lease lost; stopping to protect the transcript."]
+
+
+def test_lapsed_authority_without_suspend_still_stops(monkeypatch):
+    db = _SuspendDb(renew=True)
+    lease, interrupts = _suspended_lease(monkeypatch, db, gap_s=0.0)
+    assert lease.refresh_tick() is False
+    assert db.calls == 0
+    assert interrupts == ["Session turn lease could not be refreshed; stopping to protect the transcript."]
