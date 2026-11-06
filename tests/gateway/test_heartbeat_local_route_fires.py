@@ -12,7 +12,7 @@ import pytest
 from gateway.config import GatewayConfig
 from gateway.run import GatewayRunner
 from gateway.session_authority import SessionAuthority, initialize_session_authority
-from gateway.session_contract import Principal
+from gateway.session_contract import SessionActor
 from hermes_cli.heartbeat import HeartbeatState, load_heartbeat, save_heartbeat
 from hermes_state_runtime import list_session_admissions
 
@@ -27,7 +27,7 @@ async def _local_heartbeat(tmp_path, monkeypatch):
     runner._session_db = db
     authority = await initialize_session_authority(runner, profile_id='default', instance_id='hb-local', db=db)
     from gateway.session_local import create_local_session
-    actor = Principal('test-owner', 'default', frozenset({'session:create', 'session:submit', 'session:read'}), 'fixture')
+    actor = SessionActor('test-owner', 'default', frozenset({'session:create', 'session:submit', 'session:read'}), 'fixture')
     ref = create_local_session(authority, actor, dict(request_id='desk', source='gui', model='fixture', toolsets=[]))
     live = authority.sessions[ref.session_id]
     entry = runner.session_store.lookup_by_session_key(live.route)

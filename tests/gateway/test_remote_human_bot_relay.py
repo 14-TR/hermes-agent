@@ -10,7 +10,7 @@ import pytest
 from gateway.config import GatewayConfig
 from gateway.run import GatewayRunner
 from gateway.session_authority import SessionAuthority, initialize_session_authority
-from gateway.session_contract import Principal
+from gateway.session_contract import SessionActor
 from hermes_state_runtime import RuntimeStoreError, get_session_admission
 
 
@@ -45,7 +45,7 @@ async def test_remote_channel_is_committed_restored_and_part_of_identity(tmp_pat
     from gateway.session_local import create_local_session
     from gateway.session_local_title import title_new_session
     _runner, authority = await _authority(tmp_path, monkeypatch)
-    actor = Principal('test-owner', 'default', frozenset({'session:create', 'session:submit', 'session:read'}), 'fixture')
+    actor = SessionActor('test-owner', 'default', frozenset({'session:create', 'session:submit', 'session:read'}), 'fixture')
     try:
         ref = create_local_session(authority, actor, dict(request_id='bot', source='gui', model='fixture', toolsets=[]))
         title_new_session(authority, ref, 'Bot Chat')
