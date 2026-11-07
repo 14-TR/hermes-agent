@@ -73,6 +73,10 @@ class CanonicalBotDeliverParams(Params):
     session_id: str | None = None
     author: dict[str, JsonValue] | None = None
     notification_category: str | None = None
+    # A remote-human sender's channel ("teams"): its turn never raises desktop approval/clarify
+    # (t_1b19a76f). gateway/session_bot.py:_remote_channel validates the value; the contract
+    # must declare the key or every Teams delivery is refused invalid_params (t_5f5641bd).
+    remote_channel: str | None = None
 
 
 class CanonicalBotDeliverResult(Result):

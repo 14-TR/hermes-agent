@@ -8001,6 +8001,18 @@
             ],
             "default": null,
             "title": "Notification Category"
+          },
+          "remote_channel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Remote Channel"
           }
         },
         "required": [
