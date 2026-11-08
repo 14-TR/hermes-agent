@@ -1027,9 +1027,16 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     author = _profile_author() if reason else None
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
-        op = _commented(conn, reason, author, "UNBLOCK", lambda tid: kb.unblock_task(conn, tid))
+        def _unblock_one(tid):
+            # triage (e.g. unblock-loop breaker) -> ready/todo with loop counter reset.
+            task = kb.get_task(conn, tid)
+            if task is not None and task.status == "triage":
+                return kb.release_triage_task(conn, tid)
+            return kb.unblock_task(conn, tid)
+
+        op = _commented(conn, reason, author, "UNBLOCK", _unblock_one)
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
-                           lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
+                           lambda tid: f"cannot unblock {tid} (not blocked/scheduled/triage?)")
 
 
 def _cmd_request_review(args: argparse.Namespace) -> int:
