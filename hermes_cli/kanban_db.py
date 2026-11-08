@@ -3602,6 +3602,47 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         return True
 
 
+def release_triage_task(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Operator release ``triage`` -> ``ready`` (``todo`` while parents are open).
+
+    The supported way back to work for a card the unblock-loop breaker parked
+    in triage (``block_loop_detected``). A human release is a deliberate
+    decision about the loop, so ``block_recurrences`` restarts at 0 (else the
+    very next same-kind block would bounce it straight back to triage) and the
+    dispatcher's ``consecutive_failures`` budget is reset like unblock.
+    ``block_kind`` is kept so the history stays readable in ``show``.
+    """
+    now = int(time.time())
+    with write_txn(conn):
+        prev = conn.execute(
+            "SELECT block_kind, block_recurrences FROM tasks WHERE id = ? AND status = 'triage'",
+            (task_id,),
+        ).fetchone()
+        if prev is None:
+            return False
+        _reclaim_dangling_run(
+            conn, task_id, statuses=("triage",), now=now,
+            note="invariant recovery on triage release",
+        )
+        new_status = _landing_status_after_parents(conn, task_id)
+        cur = conn.execute(
+            "UPDATE tasks SET status = ?, current_run_id = NULL, "
+            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
+            "block_recurrences = 0, consecutive_failures = 0, last_failure_error = NULL "
+            "WHERE id = ? AND status = 'triage'", (new_status, task_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        loop = _latest_event(conn, task_id, "block_loop_detected") is not None
+        _append_event(conn, task_id, "unblocked", {
+            "status": new_status, "from_status": "triage",
+            "block_loop_reset": True, "block_loop_detected": loop,
+            "prev_block_kind": _row_get(prev, "block_kind"),
+            "prev_block_recurrences": int(_row_get(prev, "block_recurrences") or 0),
+        })
+        return True
+
+
 def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """``review`` -> ``ready``/``todo`` so the implementer re-runs on the new
     comments; restores the implementer from the ``review_requested`` event.
